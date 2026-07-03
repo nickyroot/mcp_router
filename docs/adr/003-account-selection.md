@@ -60,6 +60,16 @@ Both layers, mirroring `git config user.email` + `git commit --author`:
   state mode or run schema-sensitive clients. Choice, not doctrine.
 - If neither parameter nor state resolves the route: ask (ADR-005).
 
+## Validation (2026-07-02)
+
+Observed in production (Claude Desktop, three live Notion accounts): given an
+ambiguous search, the model neither asked nor guessed — it **fanned out
+across all three accounts in parallel** and attributed results per workspace.
+A third behavior, emergent from the enum being visible in the schema, and
+structurally impossible under Position A (a session cannot be "switched to"
+three accounts at once). The cross-account write test also passed: an
+explicitly targeted page creation landed in the correct workspace.
+
 ## Consequences
 
 - Schema noise: one extra optional property on every merged tool. Accepted;
