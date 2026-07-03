@@ -56,7 +56,9 @@ Milestones:
   `router stats`. Still pending from the v0.2 plan: Streamable HTTP upstream
   (per-session state via `Mcp-Session-Id`).
 - **v0.3** — cross-provider contexts (`switch_context work`) surfaced as
-  tools; expanded CLI (`router contexts|providers|accounts`).
+  tools; config hot reload (watch the file, connect/disconnect changed
+  accounts live, emit `tools/list_changed` — no client restart); expanded
+  CLI (`router contexts|providers|accounts`).
 
 Naming: "MCP Router" describes the mechanism, not the concept; a rename is
 deliberately deferred until pre-v1 (cheap then, a distraction now).
