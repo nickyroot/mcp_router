@@ -23,6 +23,7 @@ import {
   createUpstreamServer,
   MANAGEMENT_TOOL_NAMES,
 } from "./upstream/server.js";
+import { VERSION } from "./version.js";
 
 export interface RouterApp {
   server: Server;
@@ -40,7 +41,7 @@ export async function buildRouter(
   const manager = new DownstreamManager(config, logger, transportFactory);
   await manager.connectAll();
 
-  const metrics = new Metrics();
+  const metrics = new Metrics(VERSION);
   const state = new SessionState(config.contexts);
   const registry = { tools: [] as LogicalTool[] };
 

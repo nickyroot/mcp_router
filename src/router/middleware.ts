@@ -45,14 +45,35 @@ export function loggingMiddleware(logger: Logger): Middleware {
   };
 }
 
-interface Counter {
+export interface Counter {
   count: number;
   errors: number;
   totalMs: number;
 }
 
+export interface MetricsSnapshot {
+  version: string;
+  pid: number;
+  startedAt: string;
+  updatedAt: string;
+  totalCalls: number;
+  counters: Record<string, Counter>;
+  /** How routes were decided: explicit/context/sticky/singleton, plus
+   * "ask", "error", and "unknown-tool" outcomes (ADR-011). */
+  steps: Record<string, number>;
+}
+
 export class Metrics {
   private readonly counters = new Map<string, Counter>();
+  private readonly steps = new Map<string, number>();
+  private readonly startedAt = new Date();
+  private total = 0;
+
+  constructor(private readonly version: string = "0") {}
+
+  get totalCalls(): number {
+    return this.total;
+  }
 
   middleware(): Middleware {
     return async (ctx, next) => {
@@ -68,7 +89,22 @@ export class Metrics {
       if (ctx.outcome === "error") counter.errors += 1;
       counter.totalMs += Date.now() - started;
       this.counters.set(key, counter);
+      const step = ctx.outcome === "ok" ? (ctx.step ?? "n/a") : ctx.outcome;
+      this.steps.set(step, (this.steps.get(step) ?? 0) + 1);
+      this.total += 1;
       return result;
+    };
+  }
+
+  snapshot(): MetricsSnapshot {
+    return {
+      version: this.version,
+      pid: process.pid,
+      startedAt: this.startedAt.toISOString(),
+      updatedAt: new Date().toISOString(),
+      totalCalls: this.total,
+      counters: Object.fromEntries(this.counters),
+      steps: Object.fromEntries(this.steps),
     };
   }
 

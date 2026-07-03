@@ -1,10 +1,9 @@
 #!/usr/bin/env node
-// CLI: init / validate / run / secret (ADR-007, ADR-009, ADR-011).
+// CLI: init / validate / run / stats / secret (ADR-007, ADR-009, ADR-011).
 
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { delimiter, dirname, isAbsolute, join } from "node:path";
-import { createInterface } from "node:readline/promises";
 import { parseArgs } from "node:util";
 import { stringify as stringifyYaml } from "yaml";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -17,6 +16,12 @@ import {
 import { KEYCHAIN_SERVICE, loadKeyring } from "../config/secrets.js";
 import { NAME_PATTERN } from "../config/schema.js";
 import { createLogger, type LogLevel } from "../log/index.js";
+import {
+  formatSnapshot,
+  readSnapshot,
+  startSnapshotWriter,
+  statsPath,
+} from "../stats/snapshot.js";
 import { VERSION } from "../version.js";
 import { SAMPLE_CONFIG } from "./sample-config.js";
 
@@ -26,6 +31,7 @@ Usage:
   router init [--import <claude_desktop_config.json>] [--force] [--config <path>]
   router validate [--config <path>]
   router run [--config <path>] [--log-level debug|info|warn|error]
+  router stats                read the metrics snapshot of the running router
   router secret set <name>    store a keychain entry for \${keychain:<name>}
   router secret rm <name>     remove a keychain entry
 
@@ -153,8 +159,11 @@ async function cmdRun(opts: {
       `${app.registry.tools.length} tools exposed`,
   );
 
+  const stopStats = startSnapshotWriter(statsPath(), app.metrics, logger);
+
   const shutdown = async (): Promise<void> => {
     for (const line of app.metrics.summaryLines()) logger.info(`stats: ${line}`);
+    await stopStats();
     await app.manager.closeAll();
     process.exit(0);
   };
@@ -163,6 +172,61 @@ async function cmdRun(opts: {
 
   await app.server.connect(new StdioServerTransport());
   logger.info("listening on stdio");
+}
+
+async function cmdStats(): Promise<void> {
+  const path = statsPath();
+  if (!existsSync(path)) {
+    out(
+      `No stats snapshot at ${path}.\nStats are written by "router run" every 15 seconds and on shutdown.`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  for (const line of formatSnapshot(await readSnapshot(path))) out(line);
+}
+
+/** Reads a secret without echoing it. Piped stdin (non-TTY) reads the first
+ * line, so `echo "$TOKEN" | router secret set name` works in scripts. */
+async function promptHidden(promptText: string): Promise<string> {
+  const stdin = process.stdin;
+  if (!stdin.isTTY) {
+    const chunks: Buffer[] = [];
+    for await (const chunk of stdin) chunks.push(chunk as Buffer);
+    return Buffer.concat(chunks).toString("utf8").split("\n")[0].trim();
+  }
+  process.stderr.write(promptText);
+  return new Promise<string>((resolve, reject) => {
+    let value = "";
+    const cleanup = (): void => {
+      stdin.setRawMode(false);
+      stdin.pause();
+      stdin.off("data", onData);
+      process.stderr.write("\n");
+    };
+    const onData = (buf: Buffer): void => {
+      for (const ch of buf.toString("utf8")) {
+        if (ch === "\r" || ch === "\n" || ch === "\u0004") {
+          cleanup();
+          resolve(value.trim());
+          return;
+        }
+        if (ch === "\u0003") {
+          cleanup();
+          reject(new Error("cancelled"));
+          return;
+        }
+        if (ch === "\u007f" || ch === "\b") {
+          value = value.slice(0, -1);
+          continue;
+        }
+        value += ch;
+      }
+    };
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.on("data", onData);
+  });
 }
 
 async function cmdSecret(action: string | undefined, name: string | undefined): Promise<void> {
@@ -175,9 +239,7 @@ async function cmdSecret(action: string | undefined, name: string | undefined): 
     out(entry.deletePassword() ? `Removed keychain entry "${name}".` : `No keychain entry "${name}".`);
     return;
   }
-  const rl = createInterface({ input: process.stdin, output: process.stderr });
-  const value = (await rl.question(`Value for "${name}" (input is echoed): `)).trim();
-  rl.close();
+  const value = await promptHidden(`Value for "${name}" (input hidden): `);
   if (value === "") throw new Error("empty value; nothing stored");
   entry.setPassword(value);
   out(`Stored keychain entry "${name}" — reference it as \${keychain:${name}}`);
@@ -213,6 +275,8 @@ async function main(): Promise<void> {
       return cmdValidate(values);
     case "run":
       return cmdRun(values);
+    case "stats":
+      return cmdStats();
     case "secret":
       return cmdSecret(positionals[1], positionals[2]);
     default:

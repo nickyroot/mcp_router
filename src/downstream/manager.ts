@@ -1,6 +1,12 @@
 // Downstream connection manager (ADR-006, ADR-007). One MCP client per
 // configured account. A dead account degrades gracefully: it is reported as
 // unavailable and its siblings keep working; it never takes the router down.
+//
+// v0.2 adds per-account health: "connected" only means the child process is
+// alive, so we also remember the outcome of the most recent tool call. This
+// is what lets list_accounts distinguish a live process from a working
+// credential (found the hard way: an invalid Notion token connects fine and
+// only fails at call time).
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import {
@@ -27,6 +33,8 @@ export type TransportFactory = (
 export interface AccountStatus extends AccountRef {
   connected: boolean;
   error?: string;
+  lastOkAt?: string;
+  lastError?: { message: string; at: string };
 }
 
 interface ManagedAccount {
@@ -34,6 +42,43 @@ interface ManagedAccount {
   server: ServerConfig;
   client?: Client;
   error?: string;
+  lastOkAt?: Date;
+  lastError?: { message: string; at: Date };
+}
+
+/** Returns a failure description when a call result indicates an error.
+ * Covers `isError` plus a narrow heuristic for servers that wrap HTTP
+ * failures in structured non-error results (e.g. the Notion MCP server
+ * returns `{"status":401,...}` with isError unset). */
+function describeFailure(result: CallToolResult): string | undefined {
+  const textOf = (): string =>
+    (result.content ?? [])
+      .filter((c) => c.type === "text")
+      .map((c) => c.text)
+      .join(" ");
+  if (result.isError) {
+    return (textOf() || "tool returned an error").slice(0, 160);
+  }
+  const first = result.content?.[0];
+  if (
+    result.content?.length === 1 &&
+    first?.type === "text" &&
+    first.text.length < 1024 &&
+    first.text.trimStart().startsWith("{")
+  ) {
+    try {
+      const parsed = JSON.parse(first.text) as {
+        status?: unknown;
+        message?: unknown;
+      };
+      if (typeof parsed.status === "number" && parsed.status >= 400) {
+        return String(parsed.message ?? `HTTP ${parsed.status}`).slice(0, 160);
+      }
+    } catch {
+      // Not JSON; treat as success.
+    }
+  }
+  return undefined;
 }
 
 export class DownstreamManager {
@@ -76,6 +121,13 @@ export class DownstreamManager {
               for (const listener of this.listeners) listener();
             },
           );
+          client.onclose = () => {
+            if (managed.client === client) {
+              managed.client = undefined;
+              managed.error = "connection closed";
+              this.logger.error(`${provider}/${account}: connection closed`);
+            }
+          };
           managed.client = client;
           this.logger.debug(`connected ${provider}/${account}`);
         } catch (err) {
@@ -97,6 +149,17 @@ export class DownstreamManager {
       ...m.ref,
       connected: m.client !== undefined,
       ...(m.error !== undefined ? { error: m.error } : {}),
+      ...(m.lastOkAt !== undefined
+        ? { lastOkAt: m.lastOkAt.toISOString() }
+        : {}),
+      ...(m.lastError !== undefined
+        ? {
+            lastError: {
+              message: m.lastError.message,
+              at: m.lastError.at.toISOString(),
+            },
+          }
+        : {}),
     }));
   }
 
@@ -143,17 +206,34 @@ export class DownstreamManager {
           (managed.error ? `: ${managed.error}` : ""),
       );
     }
-    return (await managed.client.callTool({
-      name,
-      arguments: args,
-    })) as CallToolResult;
+    try {
+      const result = (await managed.client.callTool({
+        name,
+        arguments: args,
+      })) as CallToolResult;
+      const failure = describeFailure(result);
+      if (failure !== undefined) {
+        managed.lastError = { message: failure, at: new Date() };
+      } else {
+        managed.lastOkAt = new Date();
+      }
+      return result;
+    } catch (err) {
+      managed.lastError = {
+        message: (err as Error).message.slice(0, 160),
+        at: new Date(),
+      };
+      throw err;
+    }
   }
 
   async closeAll(): Promise<void> {
     await Promise.all(
       this.accounts.map(async (managed) => {
+        const client = managed.client;
+        managed.client = undefined; // silence onclose during shutdown
         try {
-          await managed.client?.close();
+          await client?.close();
         } catch {
           // Best-effort shutdown; the process is exiting anyway.
         }

@@ -11,8 +11,16 @@ export class SessionState {
    * user-defined context literally named "default" is honored (ADR-005). */
   private activeContext = "default";
 
-  /** provider -> account, set by switch_account in v0.2. */
+  /** provider -> account, set by switch_account. */
   readonly stickyAccounts: Record<string, string> = {};
+
+  setStickyAccount(provider: string, account: string): void {
+    this.stickyAccounts[provider] = account;
+  }
+
+  clearStickyAccount(provider: string): void {
+    delete this.stickyAccounts[provider];
+  }
 
   constructor(
     private readonly contexts: Record<string, Record<string, string>>,

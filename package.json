@@ -1,6 +1,6 @@
 {
   "name": "mcp-router",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "One MCP server. Unlimited accounts. Routes a single MCP endpoint to multiple downstream accounts per provider.",
   "license": "MIT",
   "type": "module",

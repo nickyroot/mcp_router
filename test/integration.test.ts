@@ -43,16 +43,44 @@ function makeFixtureServer(account: string): Server {
           required: ["query"],
         },
       },
-    ],
-  }));
-  server.setRequestHandler(CallToolRequestSchema, async (request) => ({
-    content: [
       {
-        type: "text" as const,
-        text: `results from ${account}: ${String(request.params.arguments?.query)}`,
+        name: "boom",
+        description: "Always fails with isError",
+        inputSchema: { type: "object", properties: {} },
+      },
+      {
+        name: "http_error",
+        description: "Wraps an HTTP 401 in a non-error result (Notion-style)",
+        inputSchema: { type: "object", properties: {} },
       },
     ],
   }));
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    if (request.params.name === "boom") {
+      return {
+        content: [{ type: "text" as const, text: "kaboom" }],
+        isError: true,
+      };
+    }
+    if (request.params.name === "http_error") {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: '{"status":401,"object":"error","code":"unauthorized","message":"API token is invalid."}',
+          },
+        ],
+      };
+    }
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: `results from ${account}: ${String(request.params.arguments?.query)}`,
+        },
+      ],
+    };
+  });
   return server;
 }
 
@@ -144,12 +172,94 @@ describe("router end to end", () => {
     })) as CallToolResult;
     const text = textOf(result);
     expect(text).toContain("notion:");
-    expect(text).toContain('personal — "Personal workspace" (connected)');
-    expect(text).toContain("startup (connected)");
+    expect(text).toContain('personal — "Personal workspace" (connected');
+    expect(text).toMatch(/- startup \(connected/);
   });
 
   it("records metrics per provider/account/tool", () => {
     const lines = app.metrics.summaryLines();
     expect(lines.some((l) => l.startsWith("notion/personal/search_pages"))).toBe(true);
+  });
+
+  it("switch_account sets a sticky default; clearing restores ask", async () => {
+    const switched = (await client.callTool({
+      name: "switch_account",
+      arguments: { provider: "notion", account: "startup" },
+    })) as CallToolResult;
+    expect(switched.isError).toBeFalsy();
+    expect(textOf(switched)).toContain("Using startup");
+
+    const routed = (await client.callTool({
+      name: "search_pages",
+      arguments: { query: "roadmap" },
+    })) as CallToolResult;
+    expect(textOf(routed)).toContain("results from startup: roadmap");
+    expect(textOf(routed)).toContain("[account: startup]");
+
+    const current = (await client.callTool({
+      name: "current_account",
+      arguments: {},
+    })) as CallToolResult;
+    expect(textOf(current)).toContain("notion: startup");
+
+    const cleared = (await client.callTool({
+      name: "switch_account",
+      arguments: { provider: "notion" },
+    })) as CallToolResult;
+    expect(textOf(cleared)).toContain("Cleared");
+
+    const asking = (await client.callTool({
+      name: "search_pages",
+      arguments: { query: "roadmap" },
+    })) as CallToolResult;
+    expect(textOf(asking)).toContain("Multiple notion accounts are available");
+  });
+
+  it("switch_account rejects unknown accounts and providers", async () => {
+    const badAccount = (await client.callTool({
+      name: "switch_account",
+      arguments: { provider: "notion", account: "nope" },
+    })) as CallToolResult;
+    expect(badAccount.isError).toBe(true);
+    expect(textOf(badAccount)).toContain('Unknown notion account "nope"');
+
+    const badProvider = (await client.callTool({
+      name: "switch_account",
+      arguments: { provider: "github", account: "x" },
+    })) as CallToolResult;
+    expect(badProvider.isError).toBe(true);
+    expect(textOf(badProvider)).toContain('Unknown provider "github"');
+  });
+
+  it("current_account explains defaults when nothing is active", async () => {
+    const result = (await client.callTool({
+      name: "current_account",
+      arguments: { provider: "notion" },
+    })) as CallToolResult;
+    expect(textOf(result)).toContain("notion: (none — ambiguous calls will ask)");
+  });
+
+  it("surfaces per-account call failures in list_accounts", async () => {
+    await client.callTool({
+      name: "boom",
+      arguments: { account: "personal" },
+    });
+    await client.callTool({
+      name: "http_error",
+      arguments: { account: "startup" },
+    });
+
+    const accounts = textOf(
+      (await client.callTool({
+        name: "list_accounts",
+        arguments: {},
+      })) as CallToolResult,
+    );
+    const personalLine = accounts.split("\n").find((l) => l.includes("personal"))!;
+    const startupLine = accounts.split("\n").find((l) => l.includes("- startup"))!;
+    expect(personalLine).toContain("last call failed");
+    expect(personalLine).toContain("kaboom");
+    expect(startupLine).toContain("last call failed");
+    expect(startupLine).toContain("API token is invalid");
   });
 });
