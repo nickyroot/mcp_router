@@ -16,15 +16,15 @@ from the start; we agree with the architectural version of that claim.
 
 ## Decision
 
-Resolution order, first match wins:
+Resolution order, first match wins (as amended below):
 
 1. **Explicit parameter.** `account` argument present → validate against the
    provider's accounts → route. Unknown name → instructive error listing
    valid names. Never falls through silently.
-2. **Active context.** If the active context maps this tool's provider to an
-   account → route, marking the result `[account: X]`.
-3. **Provider default / sticky account.** A per-provider active account set by
-   `switch_account` (v0.2) → route, marked.
+2. **Provider default / sticky account.** A per-provider active account set by
+   `switch_account` (v0.2) → route, marking the result `[account: X]`.
+3. **Active context.** If the active context maps this tool's provider to an
+   account → route, marked.
 4. **Singleton.** Exactly one account configured for the provider → route,
    unmarked (nothing was chosen).
 5. **Ask.** Return a normal, `isError: false` result:
@@ -49,6 +49,19 @@ From v0.1 there is always exactly one active context — the implicit `default`
 (empty) context — so step 2 exists in the code path from the first release.
 v0.3 merely lets users define and switch named contexts; the resolver never
 changes shape.
+
+## Amendment (v0.3, 2026-07-03)
+
+The original order placed context (step 2) above sticky account (step 3).
+Building `switch_context` exposed the flaw: with context on top, saying
+"switch my Notion to personal" while the `work` context is active would be
+silently ignored — the precise failure ADR-000 forbids. The order is now
+**explicit > sticky > context > singleton**: the more specific, more recent
+instruction wins. To keep the mental model clean, `switch_context` clears
+sticky overrides for the providers the new context covers — entering a
+context resets per-provider exceptions, visibly. This amendment shipped
+before sticky and contexts ever coexisted in a release, so no user-observable
+behavior changed.
 
 ## Consequences
 

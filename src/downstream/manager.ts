@@ -103,41 +103,104 @@ export class DownstreamManager {
     }
   }
 
-  async connectAll(): Promise<void> {
-    await Promise.all(
-      this.accounts.map(async (managed) => {
-        const { provider, account } = managed.ref;
-        try {
-          const transport = await this.factory(managed.ref, managed.server);
-          const client = new Client(
-            { name: "mcp-router", version: VERSION },
-            { capabilities: {} },
-          );
-          await client.connect(transport);
-          client.setNotificationHandler(
-            ToolListChangedNotificationSchema,
-            () => {
-              this.logger.debug(`${provider}/${account}: tools/list_changed`);
-              for (const listener of this.listeners) listener();
-            },
-          );
-          client.onclose = () => {
-            if (managed.client === client) {
-              managed.client = undefined;
-              managed.error = "connection closed";
-              this.logger.error(`${provider}/${account}: connection closed`);
-            }
-          };
-          managed.client = client;
-          this.logger.debug(`connected ${provider}/${account}`);
-        } catch (err) {
-          managed.error = (err as Error).message;
-          this.logger.error(
-            `failed to connect ${provider}/${account}: ${managed.error}`,
-          );
+  private async connectOne(managed: ManagedAccount): Promise<void> {
+    const { provider, account } = managed.ref;
+    try {
+      const transport = await this.factory(managed.ref, managed.server);
+      const client = new Client(
+        { name: "mcp-router", version: VERSION },
+        { capabilities: {} },
+      );
+      await client.connect(transport);
+      client.setNotificationHandler(ToolListChangedNotificationSchema, () => {
+        this.logger.debug(`${provider}/${account}: tools/list_changed`);
+        for (const listener of this.listeners) listener();
+      });
+      client.onclose = () => {
+        if (managed.client === client) {
+          managed.client = undefined;
+          managed.error = "connection closed";
+          this.logger.error(`${provider}/${account}: connection closed`);
         }
+      };
+      managed.client = client;
+      managed.error = undefined;
+      this.logger.debug(`connected ${provider}/${account}`);
+    } catch (err) {
+      managed.error = (err as Error).message;
+      this.logger.error(
+        `failed to connect ${provider}/${account}: ${managed.error}`,
+      );
+    }
+  }
+
+  private async disposeOne(managed: ManagedAccount): Promise<void> {
+    const client = managed.client;
+    managed.client = undefined; // silence onclose
+    try {
+      await client?.close();
+    } catch {
+      // Best-effort; the account is going away.
+    }
+  }
+
+  async connectAll(): Promise<void> {
+    await Promise.all(this.accounts.map((m) => this.connectOne(m)));
+  }
+
+  /** Hot reload (v0.3): diffs the account set against a new config and
+   * connects/disconnects only what changed. Unchanged accounts keep their
+   * live connections and health history. */
+  async applyConfig(
+    config: RouterConfig,
+  ): Promise<{ added: number; removed: number; changed: number }> {
+    const desired = new Map<string, ServerConfig>();
+    for (const [provider, providerConfig] of Object.entries(config.providers)) {
+      for (const [account, accountConfig] of Object.entries(
+        providerConfig.accounts,
+      )) {
+        desired.set(`${provider}/${account}`, accountConfig.server);
+      }
+    }
+
+    let added = 0;
+    let removed = 0;
+    let changed = 0;
+
+    for (const managed of [...this.accounts]) {
+      const key = `${managed.ref.provider}/${managed.ref.account}`;
+      const want = desired.get(key);
+      if (want === undefined) {
+        await this.disposeOne(managed);
+        this.accounts.splice(this.accounts.indexOf(managed), 1);
+        this.logger.info(`reload: removed ${key}`);
+        removed += 1;
+      } else {
+        if (JSON.stringify(want) !== JSON.stringify(managed.server)) {
+          await this.disposeOne(managed);
+          managed.server = want;
+          managed.lastError = undefined;
+          managed.lastOkAt = undefined;
+          await this.connectOne(managed);
+          this.logger.info(`reload: reconnected ${key} (server changed)`);
+          changed += 1;
+        }
+        desired.delete(key);
+      }
+    }
+
+    await Promise.all(
+      [...desired.entries()].map(async ([key, server]) => {
+        const [provider, account] = key.split("/");
+        const managed: ManagedAccount = { ref: { provider, account }, server };
+        this.accounts.push(managed);
+        await this.connectOne(managed);
+        this.logger.info(`reload: added ${key}`);
+        added += 1;
       }),
     );
+
+    return { added, removed, changed };
   }
 
   onToolListChanged(listener: () => void): void {

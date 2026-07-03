@@ -25,6 +25,9 @@ providers:
         server: { command: unused }
       startup:
         server: { command: unused }
+contexts:
+  work:
+    notion: startup
 `;
 
 function makeFixtureServer(account: string): Server {
@@ -237,6 +240,72 @@ describe("router end to end", () => {
       arguments: { provider: "notion" },
     })) as CallToolResult;
     expect(textOf(result)).toContain("notion: (none — ambiguous calls will ask)");
+  });
+
+  it("switch_context activates a context; sticky set afterwards overrides it", async () => {
+    // A pre-existing sticky override gets cleared when the context covers it.
+    await client.callTool({
+      name: "switch_account",
+      arguments: { provider: "notion", account: "personal" },
+    });
+    const switched = (await client.callTool({
+      name: "switch_context",
+      arguments: { context: "work" },
+    })) as CallToolResult;
+    expect(textOf(switched)).toContain('Context "work" is now active');
+    expect(textOf(switched)).toContain("notion → startup");
+    expect(textOf(switched)).toContain("Cleared per-provider overrides for: notion");
+
+    const viaContext = (await client.callTool({
+      name: "search_pages",
+      arguments: { query: "roadmap" },
+    })) as CallToolResult;
+    expect(textOf(viaContext)).toContain("results from startup: roadmap");
+    expect(textOf(viaContext)).toContain("[account: startup]");
+
+    const current = (await client.callTool({
+      name: "current_context",
+      arguments: {},
+    })) as CallToolResult;
+    expect(textOf(current)).toContain("Active context: work");
+
+    // switch_account after switch_context is a deliberate exception and wins.
+    await client.callTool({
+      name: "switch_account",
+      arguments: { provider: "notion", account: "personal" },
+    });
+    const viaSticky = (await client.callTool({
+      name: "search_pages",
+      arguments: { query: "roadmap" },
+    })) as CallToolResult;
+    expect(textOf(viaSticky)).toContain("results from personal: roadmap");
+
+    // Cleanup: back to default context, no sticky.
+    await client.callTool({ name: "switch_context", arguments: {} });
+    await client.callTool({
+      name: "switch_account",
+      arguments: { provider: "notion" },
+    });
+    const reset = (await client.callTool({
+      name: "current_context",
+      arguments: {},
+    })) as CallToolResult;
+    expect(textOf(reset)).toContain("Active context: default");
+  });
+
+  it("list_contexts shows mappings and rejects unknown contexts", async () => {
+    const listed = (await client.callTool({
+      name: "list_contexts",
+      arguments: {},
+    })) as CallToolResult;
+    expect(textOf(listed)).toContain('work: notion → startup');
+
+    const bad = (await client.callTool({
+      name: "switch_context",
+      arguments: { context: "vacation" },
+    })) as CallToolResult;
+    expect(bad.isError).toBe(true);
+    expect(textOf(bad)).toContain('unknown context "vacation"');
   });
 
   it("surfaces per-account call failures in list_accounts", async () => {

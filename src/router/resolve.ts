@@ -1,10 +1,12 @@
-// Route resolution (ADR-005). Pure function: no I/O, fully table-testable.
+// Route resolution (ADR-005, as amended for v0.3). Pure function: no I/O,
+// fully table-testable.
 //
-// Resolution order, first match wins:
+// Resolution order, first match wins — most specific, most recent intent
+// wins:
 //   1. explicit `account` parameter
-//   2. active context
-//   3. sticky per-provider account (populated by switch_account in v0.2;
-//      the code path exists from v0.1 so the resolver never changes shape)
+//   2. sticky per-provider account (switch_account — a deliberate
+//      per-provider exception to whatever context is active)
+//   3. active context (switch_context — the broad baseline)
 //   4. singleton (exactly one configured account)
 //   5. ask the model to choose (a normal, non-error result)
 
@@ -74,16 +76,17 @@ export function resolveRoute(
     }
   }
 
-  // 2. Active context.
-  const fromContext = state.contextAccounts[tool.provider];
-  if (fromContext !== undefined && fromContext in tool.routes) {
-    return route(fromContext, "context", true);
-  }
-
-  // 3. Sticky per-provider account.
+  // 2. Sticky per-provider account (beats context: it is the more specific,
+  //    more recent instruction).
   const sticky = state.stickyAccounts[tool.provider];
   if (sticky !== undefined && sticky in tool.routes) {
     return route(sticky, "sticky", true);
+  }
+
+  // 3. Active context.
+  const fromContext = state.contextAccounts[tool.provider];
+  if (fromContext !== undefined && fromContext in tool.routes) {
+    return route(fromContext, "context", true);
   }
 
   // 4. Singleton: nothing was chosen, so no marker.

@@ -67,6 +67,23 @@ describe("resolveRoute", () => {
     expect(decision).toMatchObject({ kind: "route", account: "personal", step: "explicit" });
   });
 
+  it("sticky account beats the active context (ADR-005 amendment)", () => {
+    const decision = resolveRoute(
+      multiAccountTool,
+      { query: "x" },
+      {
+        contextAccounts: { notion: "startup" },
+        stickyAccounts: { notion: "personal" },
+      },
+    );
+    expect(decision).toMatchObject({
+      kind: "route",
+      account: "personal",
+      step: "sticky",
+      marked: true,
+    });
+  });
+
   it("routes via the sticky account when no context applies", () => {
     const decision = resolveRoute(
       multiAccountTool,

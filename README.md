@@ -42,23 +42,26 @@ npm test                          # 40 tests incl. InMemoryTransport e2e
 
 Working today: config schema + validation, downstream stdio/HTTP clients with
 graceful per-account failure, tool merging with the injected `account` enum,
-the five-step route resolver, account markers on implicit routes,
-`switch_account`/`current_account` sticky defaults, auth-aware account health
-in `list_accounts`, `router stats` (persisted metrics snapshot), console
-logging, `router init --import` from `claude_desktop_config.json`, and
+the five-step route resolver (explicit > sticky > context > singleton > ask),
+account markers on implicit routes, `switch_account`/`current_account` sticky
+defaults, cross-provider contexts (`switch_context`/`current_context`/
+`list_contexts`), config hot reload (save the file — changed accounts
+reconnect and the tool list updates live; a broken save keeps the last known
+good config), auth-aware account health in `list_accounts`, `router stats`
+(persisted metrics snapshot), `router providers|accounts|contexts`,
+`router init --import` from `claude_desktop_config.json`, and
 `router secret set/rm` (OS keychain, hidden input).
 
 Milestones:
 
 - **v0.1** (shipped) — multiple accounts, one provider; merged virtual tools;
   explicit `account` parameter; `router init|validate|run`.
-- **v0.2** (this) — sticky active account, per-account call health,
-  `router stats`. Still pending from the v0.2 plan: Streamable HTTP upstream
-  (per-session state via `Mcp-Session-Id`).
-- **v0.3** — cross-provider contexts (`switch_context work`) surfaced as
-  tools; config hot reload (watch the file, connect/disconnect changed
-  accounts live, emit `tools/list_changed` — no client restart); expanded
-  CLI (`router contexts|providers|accounts`).
+- **v0.2** (shipped) — sticky active account, per-account call health,
+  `router stats`.
+- **v0.3** (this) — cross-provider contexts surfaced as tools; config hot
+  reload; expanded CLI.
+- **Next** — Streamable HTTP upstream (per-session state via
+  `Mcp-Session-Id`, URL-based client wiring).
 
 Naming: "MCP Router" describes the mechanism, not the concept; a rename is
 deliberately deferred until pre-v1 (cheap then, a distraction now).

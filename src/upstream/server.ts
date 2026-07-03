@@ -2,6 +2,10 @@
 // tools plus the router's own management tools, resolves routes, forwards
 // calls, and relays results verbatim — appending only the account marker of
 // ADR-000 on implicitly routed calls.
+//
+// Config is accessed through getConfig() rather than captured, because hot
+// reload (v0.3) can replace it while the server is live; tool schemas
+// (provider/context enums) are rebuilt on every tools/list.
 
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import {
@@ -30,10 +34,13 @@ export const MANAGEMENT_TOOL_NAMES = [
   "list_accounts",
   "switch_account",
   "current_account",
+  "list_contexts",
+  "switch_context",
+  "current_context",
 ];
 
 export interface UpstreamDeps {
-  config: RouterConfig;
+  getConfig(): RouterConfig;
   state: SessionState;
   manager: DownstreamManager;
   getTools(): LogicalTool[];
@@ -66,7 +73,7 @@ function describeAvailability(status: AccountStatus): string {
   }
   const failedAfterOk =
     status.lastError !== undefined &&
-    (status.lastOkAt === undefined || status.lastError.at > status.lastOkAt);
+    (status.lastOkAt === undefined || status.lastError.at >= status.lastOkAt);
   if (failedAfterOk && status.lastError) {
     return `connected, last call failed ${timeAgo(status.lastError.at)}: ${status.lastError.message}`;
   }
@@ -76,78 +83,119 @@ function describeAvailability(status: AccountStatus): string {
   return "connected";
 }
 
-function renderAccounts(deps: UpstreamDeps): string {
-  const lines: string[] = [];
-  const statuses = deps.manager.statuses();
-  for (const provider of Object.keys(deps.config.providers)) {
-    lines.push(`${provider}:`);
-    const labels = accountLabels(deps.config, provider);
-    const active = deps.state.stickyAccounts[provider];
-    for (const status of statuses.filter((s) => s.provider === provider)) {
-      const label = labels[status.account] ? ` — "${labels[status.account]}"` : "";
-      const activeMark = status.account === active ? " [active]" : "";
-      lines.push(
-        `  - ${status.account}${label}${activeMark} (${describeAvailability(status)})`,
-      );
-    }
-  }
-  return lines.join("\n");
-}
-
 export function createUpstreamServer(deps: UpstreamDeps): Server {
   const server = new Server(
     { name: "mcp-router", version: VERSION },
     { capabilities: { tools: { listChanged: true } } },
   );
 
-  const providerNames = Object.keys(deps.config.providers);
+  const providerNames = (): string[] => Object.keys(deps.getConfig().providers);
+
   const describeAccount = (provider: string, account: string): string => {
-    const label = accountLabels(deps.config, provider)[account];
+    const label = accountLabels(deps.getConfig(), provider)[account];
     return label ? `${account} ("${label}")` : account;
   };
 
-  const managementTools = (): Tool[] => [
-    {
-      name: "list_accounts",
-      description:
-        "List every provider and account configured in MCP Router, with labels, availability, and which account is active.",
-      inputSchema: { type: "object", properties: {} },
-      annotations: { readOnlyHint: true },
-    },
-    {
-      name: "switch_account",
-      description:
-        "Set the active account for a provider. Later tool calls without an explicit account parameter route to it (explicit parameters still override). Omit account to clear.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          provider: { type: "string", enum: providerNames },
-          account: {
-            type: "string",
-            description:
-              "Account name to make active. Omit to clear the active account for this provider.",
+  const describeMapping = (mapping: Record<string, string>): string =>
+    Object.entries(mapping)
+      .map(([provider, account]) => `${provider} → ${describeAccount(provider, account)}`)
+      .join(", ") || "(empty — no provider mappings)";
+
+  const renderAccounts = (): string => {
+    const lines: string[] = [];
+    const statuses = deps.manager.statuses();
+    for (const provider of providerNames()) {
+      lines.push(`${provider}:`);
+      const labels = accountLabels(deps.getConfig(), provider);
+      const active = deps.state.stickyAccounts[provider];
+      for (const status of statuses.filter((s) => s.provider === provider)) {
+        const label = labels[status.account]
+          ? ` — "${labels[status.account]}"`
+          : "";
+        const activeMark = status.account === active ? " [active]" : "";
+        lines.push(
+          `  - ${status.account}${label}${activeMark} (${describeAvailability(status)})`,
+        );
+      }
+    }
+    return lines.join("\n");
+  };
+
+  const managementTools = (): Tool[] => {
+    const providers = providerNames();
+    const contexts = deps.state.contextNames();
+    return [
+      {
+        name: "list_accounts",
+        description:
+          "List every provider and account configured in MCP Router, with labels, availability, and which account is active.",
+        inputSchema: { type: "object", properties: {} },
+        annotations: { readOnlyHint: true },
+      },
+      {
+        name: "switch_account",
+        description:
+          "Set the active account for one provider. Later tool calls without an explicit account parameter route to it (explicit parameters still override). Omit account to clear.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            provider: { type: "string", enum: providers },
+            account: {
+              type: "string",
+              description:
+                "Account name to make active. Omit to clear the active account for this provider.",
+            },
+          },
+          required: ["provider"],
+        },
+      },
+      {
+        name: "current_account",
+        description:
+          "Show which account is active for each provider (or one provider).",
+        inputSchema: {
+          type: "object",
+          properties: {
+            provider: {
+              type: "string",
+              enum: providers,
+              description: "Limit the answer to one provider.",
+            },
           },
         },
-        required: ["provider"],
+        annotations: { readOnlyHint: true },
       },
-    },
-    {
-      name: "current_account",
-      description:
-        "Show which account is active for each provider (or one provider).",
-      inputSchema: {
-        type: "object",
-        properties: {
-          provider: {
-            type: "string",
-            enum: providerNames,
-            description: "Limit the answer to one provider.",
+      {
+        name: "list_contexts",
+        description:
+          "List the configured contexts (named cross-provider account groupings) and which one is active.",
+        inputSchema: { type: "object", properties: {} },
+        annotations: { readOnlyHint: true },
+      },
+      {
+        name: "switch_context",
+        description:
+          "Activate a context: every provider it covers routes to that context's account until overridden. Clears per-provider switch_account overrides for covered providers. Omit context to return to the default (empty) context.",
+        inputSchema: {
+          type: "object",
+          properties: {
+            context: {
+              type: "string",
+              ...(contexts.length > 0 ? { enum: contexts } : {}),
+              description:
+                "Context name to activate. Omit to clear (default context).",
+            },
           },
         },
       },
-      annotations: { readOnlyHint: true },
-    },
-  ];
+      {
+        name: "current_context",
+        description: "Show the active context and its provider mappings.",
+        inputSchema: { type: "object", properties: {} },
+        annotations: { readOnlyHint: true },
+      },
+    ];
+  };
 
   server.setRequestHandler(ListToolsRequestSchema, async () => {
     const tools: Tool[] = [
@@ -165,7 +213,7 @@ export function createUpstreamServer(deps: UpstreamDeps): Server {
   });
 
   const validProvider = (value: unknown): string | undefined =>
-    typeof value === "string" && value in deps.config.providers
+    typeof value === "string" && value in deps.getConfig().providers
       ? value
       : undefined;
 
@@ -174,7 +222,7 @@ export function createUpstreamServer(deps: UpstreamDeps): Server {
     if (provider === undefined) {
       ctx.outcome = "error";
       return textResult(
-        `Unknown provider "${String(ctx.args.provider)}". Configured providers: ${providerNames.join(", ")}.`,
+        `Unknown provider "${String(ctx.args.provider)}". Configured providers: ${providerNames().join(", ")}.`,
         true,
       );
     }
@@ -187,7 +235,9 @@ export function createUpstreamServer(deps: UpstreamDeps): Server {
         `Cleared the active ${provider} account; ambiguous calls will ask again.`,
       );
     }
-    const accounts = Object.keys(deps.config.providers[provider].accounts);
+    const accounts = Object.keys(
+      deps.getConfig().providers[provider].accounts,
+    );
     if (typeof account !== "string" || !accounts.includes(account)) {
       ctx.outcome = "error";
       return textResult(
@@ -208,25 +258,32 @@ export function createUpstreamServer(deps: UpstreamDeps): Server {
   };
 
   const handleCurrentAccount = (ctx: CallContext): CallToolResult => {
-    let scope = providerNames;
+    let scope = providerNames();
     if (ctx.args.provider !== undefined) {
       const provider = validProvider(ctx.args.provider);
       if (provider === undefined) {
         ctx.outcome = "error";
         return textResult(
-          `Unknown provider "${String(ctx.args.provider)}". Configured providers: ${providerNames.join(", ")}.`,
+          `Unknown provider "${String(ctx.args.provider)}". Configured providers: ${providerNames().join(", ")}.`,
           true,
         );
       }
       scope = [provider];
       ctx.provider = provider;
     }
+    const contextAccounts = deps.state.routeState().contextAccounts;
     const lines = scope.map((provider) => {
       const sticky = deps.state.stickyAccounts[provider];
       if (sticky !== undefined) {
         return `${provider}: ${describeAccount(provider, sticky)} — active via switch_account`;
       }
-      const accounts = Object.keys(deps.config.providers[provider].accounts);
+      const fromContext = contextAccounts[provider];
+      if (fromContext !== undefined) {
+        return `${provider}: ${describeAccount(provider, fromContext)} — via context "${deps.state.activeContextName}"`;
+      }
+      const accounts = Object.keys(
+        deps.getConfig().providers[provider].accounts,
+      );
       if (accounts.length === 1) {
         return `${provider}: ${describeAccount(provider, accounts[0])} (only configured account)`;
       }
@@ -236,16 +293,90 @@ export function createUpstreamServer(deps: UpstreamDeps): Server {
     return textResult(lines.join("\n"));
   };
 
+  const handleListContexts = (ctx: CallContext): CallToolResult => {
+    ctx.outcome = "ok";
+    const names = deps.state.contextNames();
+    if (names.length === 0) {
+      return textResult(
+        "No contexts configured. Add a `contexts:` block to the router config to group accounts across providers.",
+      );
+    }
+    const active = deps.state.activeContextName;
+    const lines = names.map((name) => {
+      const mark = name === active ? " [active]" : "";
+      return `${name}${mark}: ${describeMapping(deps.state.contextMapping(name) ?? {})}`;
+    });
+    if (active === "default") {
+      lines.push("(active: default — empty context, no provider mappings)");
+    }
+    return textResult(lines.join("\n"));
+  };
+
+  const handleSwitchContext = (ctx: CallContext): CallToolResult => {
+    const name = ctx.args.context;
+    const target = name === undefined ? "default" : name;
+    if (typeof target !== "string") {
+      ctx.outcome = "error";
+      return textResult(`Invalid context "${String(name)}".`, true);
+    }
+    let cleared: string[];
+    try {
+      cleared = deps.state.switchContext(target);
+    } catch (err) {
+      ctx.outcome = "error";
+      return textResult((err as Error).message, true);
+    }
+    ctx.outcome = "ok";
+    if (target === "default") {
+      return textResult(
+        "Returned to the default (empty) context; per-provider defaults and explicit parameters still apply.",
+      );
+    }
+    const mapping = deps.state.contextMapping(target) ?? {};
+    const clearedNote =
+      cleared.length > 0
+        ? ` Cleared per-provider overrides for: ${cleared.join(", ")}.`
+        : "";
+    return textResult(
+      `Context "${target}" is now active: ${describeMapping(mapping)}.` +
+        clearedNote +
+        ` Providers not covered keep their own defaults; explicit "account" parameters and switch_account still override. ` +
+        `(Shared by every conversation using this router.)`,
+    );
+  };
+
+  const handleCurrentContext = (ctx: CallContext): CallToolResult => {
+    ctx.outcome = "ok";
+    const active = deps.state.activeContextName;
+    if (active === "default") {
+      return textResult(
+        "Active context: default (empty — no provider mappings).",
+      );
+    }
+    return textResult(
+      `Active context: ${active} — ${describeMapping(deps.state.contextMapping(active) ?? {})}`,
+    );
+  };
+
   const handler = async (ctx: CallContext): Promise<CallToolResult> => {
     if (MANAGEMENT_TOOL_NAMES.includes(ctx.toolName)) {
       ctx.step = "management";
     }
-    if (ctx.toolName === "list_accounts") {
-      ctx.outcome = "ok";
-      return textResult(renderAccounts(deps));
+    switch (ctx.toolName) {
+      case "list_accounts":
+        ctx.outcome = "ok";
+        return textResult(renderAccounts());
+      case "switch_account":
+        return handleSwitchAccount(ctx);
+      case "current_account":
+        return handleCurrentAccount(ctx);
+      case "list_contexts":
+        return handleListContexts(ctx);
+      case "switch_context":
+        return handleSwitchContext(ctx);
+      case "current_context":
+        return handleCurrentContext(ctx);
     }
-    if (ctx.toolName === "switch_account") return handleSwitchAccount(ctx);
-    if (ctx.toolName === "current_account") return handleCurrentAccount(ctx);
 
     const tool = deps.getTools().find((t) => t.name === ctx.toolName);
     if (!tool) {
@@ -258,7 +389,7 @@ export function createUpstreamServer(deps: UpstreamDeps): Server {
       tool,
       ctx.args,
       deps.state.routeState(),
-      accountLabels(deps.config, tool.provider),
+      accountLabels(deps.getConfig(), tool.provider),
     );
     if (decision.kind === "ask") {
       ctx.outcome = "ask";
