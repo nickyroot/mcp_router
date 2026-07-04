@@ -8,15 +8,35 @@ problem exceptionally well: **multiple accounts per provider** — three Notion
 workspaces, two GitHub identities, several Slack teams — through a single
 MCP endpoint, with account selection that feels native to the model.
 
-```
-Claude Desktop
-      │  MCP
-      ▼
-  MCP Router ──► Notion (personal)
-      │      ──► Notion (startup)
-      │      ──► GitHub (company)
-      └────────► ...
-```
+![MCP Router: one user with work-1, work-2 and personal contexts, routed through one MCP server to multiple Notion and Slack accounts](docs/overview.svg)
+
+**In plain terms:** AI tools like Claude can connect to apps such as Notion or
+Slack, but each connection only knows about one account — and most people
+have several. Two jobs, a client, a personal life. Instead of installing the
+same connector three times and drowning in duplicate tools, you install the
+router once and tell it about all your accounts. To the AI it looks like a
+single, ordinary connection; behind the scenes the router quietly holds one
+connection per account and delivers each request to the right one. You choose
+where things go the way you'd tell a colleague — "use my work-1 stuff for
+now", "actually, search my personal Notion" — or group whole setups into
+contexts, so switching from work-1 to personal flips Notion, Slack, and
+everything else in one move. Every reply says which account it used, so
+nothing lands in the wrong workspace silently, and adding a new account is
+just a few lines in a config file — the running router picks it up the moment
+you save.
+
+## Works with any MCP client
+
+The router speaks plain, standards-track MCP on both sides — there is nothing
+Claude-specific in the contract (a deliberate constraint; see
+[ADR-012](docs/adr/012-mcp-spec-evolution.md)). The `account` parameter is
+ordinary JSON Schema, the "which account?" prompt is an ordinary text result,
+and `switch_account`/`switch_context` are ordinary tools. Claude Desktop,
+Cursor, Windsurf, Zed, VS Code, or a homegrown agent on any model can all sit
+upstream. Two qualifiers: the *experience* scales with the model (reading the
+enum, obeying the ask-message, and fanning out across accounts are model
+behaviors — weaker models just get asked more often), and each client has its
+own ritual for registering a local stdio server.
 
 ## Design philosophy
 
